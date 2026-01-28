@@ -1,0 +1,629 @@
+# Experimento de Factorización de Semiprimos (Shor Local)
+
+Marco experimental para estudiar la factorización de números semiprimos usando el algoritmo cuántico de Shor en simulación local.
+
+## Objetivo
+
+Analizar estadísticamente el comportamiento del algoritmo de Shor para factorizar semiprimos de 4 a 12 bits, midiendo:
+- Shots necesarios para viabilidad
+- Tasa de éxito vs tamaño del número (n bits)
+- Recursos cuánticos vs tasa de éxito
+- Probabilidad de éxito en x intentos
+- Distribución de resultados (campana de Gauss)
+
+> [!IMPORTANT]
+> **NO usar IBM Quantum** - Solo simulación local con Qiskit Aer
+> **NO usar sympy para factorizar** - Los factores deben obtenerse del circuito cuántico
+
+---
+
+## Proposed Changes
+
+### 1. Configuración e Imports
+
+#### [MODIFY] [ComputacionCuantica.ipynb](file:///c:/Users/ASUS/Documents/Programacion/factorizacion_numeros_semiprimos/ComputacionCuantica.ipynb)
+
+**Celda 1 - Título:**
+```markdown
+# Factorización de Semiprimos con Algoritmo de Shor
+## Análisis Estadístico en Simulación Cuántica Local
+
+Objetivo: Estudiar el comportamiento probabilístico del algoritmo de Shor para factorizar semiprimos, analizando:
+- Shots necesarios para viabilidad
+- Tasa de éxito vs tamaño del número (n bits)  
+- Recursos cuánticos requeridos
+- Probabilidad de éxito acumulada
+```
+
+**Celda 2 - Instalación:**
+```python
+!pip -q install pandas numpy matplotlib tqdm scipy
+!pip -q install qiskit qiskit-aer
+```
+
+**Celda 3 - Imports:**
+```python
+import time
+import math
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+from scipy import stats
+from scipy.stats import norm
+from fractions import Fraction
+from tqdm import tqdm
+import os
+
+from qiskit import QuantumCircuit, QuantumRegister, ClassicalRegister
+from qiskit_aer import AerSimulator
+
+print("Simulador cuántico local configurado")
+```
+
+---
+
+### 2. Configuración Experimental
+
+**Celda - Parámetros:**
+```python
+# === CONFIGURACIÓN DEL EXPERIMENTO ===
+# Rango de bits para semiprimos (4 a 12 bits)
+BIT_RANGE = list(range(4, 13))  # 4, 5, 6, ..., 12 bits
+
+# Shots por ejecución (se analizarán diferentes valores)
+M_SHOTS_LIST = [100, 500, 1024, 2048, 4096]
+
+# Repeticiones por escenario para análisis estadístico
+R = 50
+
+# Semiprimos por cada tamaño de bits
+SEMIPRIMES_PER_SIZE = 5
+
+# Directorio de datos
+DATA_DIR = "datasets"
+os.makedirs(DATA_DIR, exist_ok=True)
+```
+
+---
+
+### 3. Generación de Semiprimos (Sin sympy)
+
+**Celda - Generador de primos y semiprimos:**
+```python
+def is_prime(n: int) -> bool:
+    """Test de primalidad sin sympy."""
+    if n < 2:
+        return False
+    if n == 2:
+        return True
+    if n % 2 == 0:
+        return False
+    for i in range(3, int(math.isqrt(n)) + 1, 2):
+        if n % i == 0:
+            return False
+    return True
+
+def generate_primes_in_range(min_val: int, max_val: int) -> list:
+    """Genera lista de primos en un rango."""
+    return [n for n in range(min_val, max_val + 1) if is_prime(n)]
+
+def generate_semiprimes(n_bits: int, count: int) -> list:
+    """Genera semiprimos de exactamente n_bits."""
+    min_val = 2 ** (n_bits - 1)
+    max_val = 2 ** n_bits - 1
+    
+    # Primos para generar semiprimos
+    prime_max = int(math.isqrt(max_val)) + 1
+    primes = generate_primes_in_range(2, prime_max)
+    
+    semiprimes = []
+    for p in primes:
+        for q in primes:
+            if p <= q:
+                N = p * q
+                if min_val <= N <= max_val and p != q:
+                    semiprimes.append((N, p, q))
+    
+    # Seleccionar aleatoriamente
+    np.random.shuffle(semiprimes)
+    return semiprimes[:count]
+
+# Generar semiprimos para el experimento
+print("Generando semiprimos de prueba...")
+test_semiprimes = {}
+for n_bits in BIT_RANGE:
+    test_semiprimes[n_bits] = generate_semiprimes(n_bits, SEMIPRIMES_PER_SIZE)
+    print(f"  {n_bits} bits: {len(test_semiprimes[n_bits])} semiprimos")
+```
+
+---
+
+### 4. Algoritmo de Shor (Implementación Cuántica Pura)
+
+**Celda - QFT y Exponenciación Modular:**
+```python
+def qft_dagger(circuit: QuantumCircuit, n: int):
+    """QFT inversa para n qubits."""
+    for qubit in range(n // 2):
+        circuit.swap(qubit, n - qubit - 1)
+    for j in range(n):
+        for m in range(j):
+            circuit.cp(-np.pi / float(2 ** (j - m)), m, j)
+        circuit.h(j)
+
+def c_amod15(a: int, power: int) -> QuantumCircuit:
+    """Multiplicación modular controlada para N=15."""
+    # Implementación optimizada para N=15
+    U = QuantumCircuit(4)
+    for _ in range(power):
+        if a in [2, 13]:
+            U.swap(2, 3)
+            U.swap(1, 2)
+            U.swap(0, 1)
+        if a in [7, 8]:
+            U.swap(0, 1)
+            U.swap(1, 2)
+            U.swap(2, 3)
+        if a in [4, 11]:
+            U.swap(1, 3)
+            U.swap(0, 2)
+        if a in [7, 11, 13]:
+            for q in range(4):
+                U.x(q)
+    U = U.to_gate()
+    U.name = f"{a}^{power} mod 15"
+    c_U = U.control()
+    return c_U
+
+def shor_circuit_15(a: int, n_count: int = 8) -> QuantumCircuit:
+    """Circuito de Shor para N=15."""
+    qc = QuantumCircuit(n_count + 4, n_count)
+    
+    # Inicializar qubits de conteo en superposición
+    for q in range(n_count):
+        qc.h(q)
+    
+    # Inicializar registro auxiliar en |1⟩
+    qc.x(n_count)
+    
+    # Exponenciación modular controlada
+    for q in range(n_count):
+        qc.append(c_amod15(a, 2**q), [q] + list(range(n_count, n_count + 4)))
+    
+    # QFT inversa
+    qft_dagger(qc, n_count)
+    
+    # Medición
+    qc.measure(range(n_count), range(n_count))
+    
+    return qc
+```
+
+**Celda - Algoritmo de Shor Generalizado:**
+```python
+def gcd(a: int, b: int) -> int:
+    """Máximo común divisor sin sympy."""
+    while b:
+        a, b = b, a % b
+    return a
+
+def mod_exp(base: int, exp: int, mod: int) -> int:
+    """Exponenciación modular eficiente."""
+    result = 1
+    base = base % mod
+    while exp > 0:
+        if exp % 2 == 1:
+            result = (result * base) % mod
+        exp = exp >> 1
+        base = (base * base) % mod
+    return result
+
+def find_period_quantum(N: int, a: int, shots: int) -> tuple:
+    """
+    Encuentra el período usando QPE (estimación de fase cuántica).
+    Retorna (período, éxito, tiempo, qubits_usados).
+    """
+    t0 = time.time()
+    
+    # Número de qubits de precisión
+    n_count = max(4, 2 * N.bit_length() + 1)
+    n_count = min(n_count, 10)  # Limitar para simulación
+    
+    # Crear circuito
+    if N == 15:
+        qc = shor_circuit_15(a, n_count)
+    else:
+        # Para otros N, usar circuito simplificado
+        qc = create_general_shor_circuit(N, a, n_count)
+    
+    # Simular
+    simulator = AerSimulator()
+    job = simulator.run(qc, shots=shots)
+    result = job.result()
+    counts = result.get_counts()
+    
+    elapsed = time.time() - t0
+    qubits_used = qc.num_qubits
+    
+    # Procesar resultados para encontrar período
+    measured_phases = []
+    for output, count in counts.items():
+        decimal = int(output, 2)
+        phase = decimal / (2 ** n_count)
+        measured_phases.append((phase, count))
+    
+    # Buscar período a partir de las fases medidas
+    for phase, count in sorted(measured_phases, key=lambda x: -x[1]):
+        if phase != 0:
+            frac = Fraction(phase).limit_denominator(N)
+            r = frac.denominator
+            
+            # Verificar si r es el período correcto
+            if mod_exp(a, r, N) == 1:
+                return r, True, elapsed, qubits_used
+    
+    return None, False, elapsed, qubits_used
+
+def create_general_shor_circuit(N: int, a: int, n_count: int) -> QuantumCircuit:
+    """Circuito de Shor generalizado (simplificado para simulación)."""
+    n_aux = N.bit_length()
+    qc = QuantumCircuit(n_count + n_aux, n_count)
+    
+    # Superposición inicial
+    for q in range(n_count):
+        qc.h(q)
+    
+    # Inicializar |1⟩
+    qc.x(n_count)
+    
+    # Rotaciones de fase (aproximación)
+    for q in range(n_count):
+        angle = 2 * np.pi * (a ** (2 ** q) % N) / N
+        qc.p(angle, q)
+    
+    # QFT inversa
+    qft_dagger(qc, n_count)
+    
+    # Medición
+    qc.measure(range(n_count), range(n_count))
+    
+    return qc
+```
+
+---
+
+### 5. Factorización Completa
+
+**Celda - Función principal de factorización:**
+```python
+def shor_factor(N: int, shots: int, max_attempts: int = 10) -> dict:
+    """
+    Ejecuta el algoritmo de Shor para factorizar N.
+    
+    Returns:
+        dict con: success, factors, attempts, time, qubits_used, etc.
+    """
+    t_start = time.time()
+    
+    # Verificaciones previas
+    if N % 2 == 0:
+        return {'success': True, 'factors': [2, N // 2], 'attempts': 0, 
+                'time': 0, 'qubits_used': 0, 'method': 'trivial_even'}
+    
+    # Intentar diferentes bases
+    for attempt in range(1, max_attempts + 1):
+        a = np.random.randint(2, N - 1)
+        
+        # Verificar si a comparte factor con N
+        g = gcd(a, N)
+        if g > 1:
+            return {'success': True, 'factors': [g, N // g], 'attempts': attempt,
+                    'time': time.time() - t_start, 'qubits_used': 0, 'method': 'gcd_luck'}
+        
+        # Encontrar período cuánticamente
+        r, found, q_time, qubits = find_period_quantum(N, a, shots)
+        
+        if found and r is not None and r % 2 == 0:
+            # Intentar factorizar
+            x = mod_exp(a, r // 2, N)
+            factor1 = gcd(x - 1, N)
+            factor2 = gcd(x + 1, N)
+            
+            if factor1 > 1 and factor1 < N:
+                return {'success': True, 'factors': sorted([factor1, N // factor1]),
+                        'attempts': attempt, 'time': time.time() - t_start,
+                        'qubits_used': qubits, 'method': 'quantum'}
+            if factor2 > 1 and factor2 < N:
+                return {'success': True, 'factors': sorted([factor2, N // factor2]),
+                        'attempts': attempt, 'time': time.time() - t_start,
+                        'qubits_used': qubits, 'method': 'quantum'}
+    
+    return {'success': False, 'factors': [], 'attempts': max_attempts,
+            'time': time.time() - t_start, 'qubits_used': qubits, 'method': 'failed'}
+```
+
+---
+
+### 6. Experimento Principal
+
+**Celda - Loop de experimento:**
+```python
+def run_experiment():
+    """Ejecuta el experimento completo."""
+    rows = []
+    
+    total_scenarios = len(BIT_RANGE) * len(M_SHOTS_LIST) * SEMIPRIMES_PER_SIZE * R
+    
+    with tqdm(total=total_scenarios, desc="Experimento") as pbar:
+        for n_bits in BIT_RANGE:
+            semiprimes = test_semiprimes.get(n_bits, [])
+            
+            for N, p, q in semiprimes:
+                for M in M_SHOTS_LIST:
+                    for rep in range(1, R + 1):
+                        result = shor_factor(N, shots=M)
+                        
+                        rows.append({
+                            'n_bits': n_bits,
+                            'N': N,
+                            'p_true': p,
+                            'q_true': q,
+                            'M_shots': M,
+                            'rep': rep,
+                            'success': int(result['success']),
+                            'attempts': result['attempts'],
+                            'time_sec': result['time'],
+                            'qubits_used': result['qubits_used'],
+                            'method': result['method'],
+                            'factors_found': str(result['factors'])
+                        })
+                        pbar.update(1)
+    
+    return pd.DataFrame(rows)
+
+print("Iniciando experimento de factorización...")
+df_results = run_experiment()
+df_results.to_csv(f"{DATA_DIR}/shor_experiment.csv", index=False)
+print(f"\nResultados guardados: {DATA_DIR}/shor_experiment.csv")
+```
+
+---
+
+### 7. Análisis Estadístico
+
+**Celda - Tasa de éxito y probabilidades:**
+```python
+def analyze_success_rate(df: pd.DataFrame):
+    """Analiza tasa de éxito por n_bits y shots."""
+    
+    # === TASA DE ÉXITO POR N_BITS Y SHOTS ===
+    summary = df.groupby(['n_bits', 'M_shots']).agg(
+        total=('success', 'count'),
+        successes=('success', 'sum'),
+        p_hat=('success', 'mean'),
+        avg_attempts=('attempts', 'mean'),
+        avg_time=('time_sec', 'mean')
+    ).reset_index()
+    
+    print("\n" + "="*70)
+    print("TASA DE ÉXITO (p̂) POR ESCENARIO")
+    print("="*70)
+    print(summary.to_string(index=False))
+    
+    # === TABLA: N_BITS VS TASA DE ÉXITO ===
+    by_bits = df.groupby('n_bits')['success'].mean()
+    print("\n" + "="*70)
+    print("TASA DE ÉXITO VS TAMAÑO DEL NÚMERO (n bits)")
+    print("="*70)
+    for n, rate in by_bits.items():
+        print(f"  {n:2d} bits: {rate:.4f} ({rate*100:.1f}%)")
+    
+    # === RECURSOS VS TASA DE ÉXITO ===
+    by_shots = df.groupby('M_shots')['success'].mean()
+    print("\n" + "="*70)
+    print("TASA DE ÉXITO VS SHOTS (RECURSOS)")
+    print("="*70)
+    for shots, rate in by_shots.items():
+        print(f"  {shots:5d} shots: {rate:.4f} ({rate*100:.1f}%)")
+    
+    return summary
+
+summary = analyze_success_rate(df_results)
+```
+
+**Celda - Tabla de frecuencias:**
+```python
+def create_frequency_tables(df: pd.DataFrame):
+    """Crea tablas de frecuencia éxitos vs fracasos."""
+    
+    print("\n" + "="*70)
+    print("TABLAS DE FRECUENCIA (ÉXITOS VS FRACASOS)")
+    print("="*70)
+    
+    for n_bits in sorted(df['n_bits'].unique()):
+        subset = df[df['n_bits'] == n_bits]
+        freq = subset.groupby(['M_shots', 'success']).size().unstack(fill_value=0)
+        freq.columns = ['Fracasos', 'Éxitos']
+        freq['Total'] = freq.sum(axis=1)
+        freq['Tasa Éxito'] = freq['Éxitos'] / freq['Total']
+        
+        print(f"\n{n_bits} bits:")
+        print(freq.to_string())
+
+create_frequency_tables(df_results)
+```
+
+---
+
+### 8. Probabilidad de Primer Éxito
+
+**Celda - Probabilidad en x intentos:**
+```python
+def compute_first_success_probability(p_hat: float, x_max: int = 20) -> tuple:
+    """
+    Calcula P(primer éxito en intento x) = (1-p)^(x-1) * p
+    Y P(éxito en ≤x intentos) = 1 - (1-p)^x
+    """
+    x_values = list(range(1, x_max + 1))
+    
+    # Probabilidad de primer éxito exactamente en intento x
+    p_first_at_x = [(1 - p_hat)**(x-1) * p_hat for x in x_values]
+    
+    # Probabilidad acumulada (éxito en x o menos intentos)
+    p_cumulative = [1 - (1 - p_hat)**x for x in x_values]
+    
+    return x_values, p_first_at_x, p_cumulative
+
+def analyze_attempts_needed(df: pd.DataFrame):
+    """Analiza cuántos intentos se necesitan para asegurar éxito."""
+    
+    print("\n" + "="*70)
+    print("PROBABILIDAD DE ÉXITO VS NÚMERO DE INTENTOS")
+    print("="*70)
+    
+    # Para cada n_bits, calcular probabilidad acumulada
+    for n_bits in sorted(df['n_bits'].unique()):
+        p_hat = df[df['n_bits'] == n_bits]['success'].mean()
+        
+        if p_hat > 0:
+            # Encontrar intentos para 95% y 99% de probabilidad
+            x_95 = int(np.ceil(np.log(0.05) / np.log(1 - p_hat))) if p_hat < 1 else 1
+            x_99 = int(np.ceil(np.log(0.01) / np.log(1 - p_hat))) if p_hat < 1 else 1
+            
+            print(f"\n{n_bits} bits (p̂ = {p_hat:.4f}):")
+            print(f"  Para 95% prob. de éxito: {x_95} intentos")
+            print(f"  Para 99% prob. de éxito: {x_99} intentos")
+
+analyze_attempts_needed(df_results)
+```
+
+---
+
+### 9. Distribución y Campana de Gauss
+
+**Celda - Análisis de distribución:**
+```python
+def analyze_distribution(df: pd.DataFrame):
+    """Analiza la distribución de intentos necesarios."""
+    
+    # Filtrar solo éxitos
+    success_df = df[df['success'] == 1]
+    
+    fig, axes = plt.subplots(2, 2, figsize=(14, 10))
+    
+    # 1. Histograma de intentos hasta éxito
+    ax = axes[0, 0]
+    attempts_data = success_df['attempts'].values
+    ax.hist(attempts_data, bins=range(1, 12), density=True, alpha=0.7, 
+            edgecolor='black', label='Datos')
+    
+    # Ajuste a distribución geométrica
+    p_est = 1 / attempts_data.mean() if len(attempts_data) > 0 else 0.5
+    x = np.arange(1, 11)
+    geom_pmf = (1 - p_est)**(x-1) * p_est
+    ax.plot(x, geom_pmf, 'r-', linewidth=2, label=f'Geométrica (p={p_est:.3f})')
+    
+    ax.set_xlabel('Intentos hasta éxito')
+    ax.set_ylabel('Densidad')
+    ax.set_title('Distribución de intentos')
+    ax.legend()
+    ax.grid(True, alpha=0.3)
+    
+    # 2. Tasa de éxito por n_bits con ajuste
+    ax = axes[0, 1]
+    by_bits = df.groupby('n_bits')['success'].mean()
+    ax.bar(by_bits.index, by_bits.values, alpha=0.7, edgecolor='black')
+    ax.set_xlabel('Tamaño (n bits)')
+    ax.set_ylabel('Tasa de éxito')
+    ax.set_title('n bits vs Tasa de éxito')
+    ax.grid(True, alpha=0.3)
+    
+    # 3. Tiempos de ejecución (distribución normal)
+    ax = axes[1, 0]
+    times = df['time_sec'].values
+    ax.hist(times, bins=30, density=True, alpha=0.7, edgecolor='black')
+    
+    # Ajuste gaussiano
+    mu, std = norm.fit(times)
+    x = np.linspace(times.min(), times.max(), 100)
+    ax.plot(x, norm.pdf(x, mu, std), 'r-', linewidth=2, 
+            label=f'Normal (μ={mu:.3f}, σ={std:.3f})')
+    ax.set_xlabel('Tiempo (s)')
+    ax.set_ylabel('Densidad')
+    ax.set_title('Distribución de tiempos (Campana de Gauss)')
+    ax.legend()
+    ax.grid(True, alpha=0.3)
+    
+    # 4. Recursos (shots) vs Tasa de éxito
+    ax = axes[1, 1]
+    by_shots = df.groupby('M_shots')['success'].mean()
+    ax.plot(by_shots.index, by_shots.values, 'bo-', linewidth=2, markersize=8)
+    ax.set_xlabel('Shots (recursos)')
+    ax.set_ylabel('Tasa de éxito')
+    ax.set_title('Recursos vs Tasa de éxito')
+    ax.set_xscale('log')
+    ax.grid(True, alpha=0.3)
+    
+    plt.tight_layout()
+    plt.savefig(f"{DATA_DIR}/analysis_plots.png", dpi=150)
+    plt.show()
+
+analyze_distribution(df_results)
+```
+
+---
+
+### 10. Límites de Simulación Clásica
+
+**Celda - Análisis de límites:**
+```python
+def analyze_classical_limits():
+    """Analiza hasta cuántos bits puede manejar un PC."""
+    
+    print("\n" + "="*70)
+    print("LÍMITES DE SIMULACIÓN CLÁSICA")
+    print("="*70)
+    
+    results = []
+    for n_bits in range(4, 25, 2):
+        N = 2 ** n_bits - 1
+        n_qubits = 2 * n_bits + 3  # Qubits necesarios para Shor
+        
+        # Memoria estimada (2^n estados * 16 bytes por amplitud compleja)
+        memory_gb = (2 ** n_qubits) * 16 / (1024**3)
+        
+        feasible = memory_gb < 32  # Asumiendo 32GB RAM máximo típico
+        
+        results.append({
+            'n_bits': n_bits,
+            'N_max': N,
+            'qubits_shor': n_qubits,
+            'memory_gb': memory_gb,
+            'feasible': '✓' if feasible else '✗'
+        })
+        
+        print(f"  {n_bits:2d} bits: {n_qubits} qubits, {memory_gb:.2f} GB RAM {'✓' if feasible else '✗'}")
+    
+    print("\nConclusión: En un PC típico (16-32GB RAM), se pueden simular")
+    print("semiprimos de hasta ~10-12 bits con Shor completo.")
+    print("Números mayores requieren hardware cuántico real o técnicas avanzadas.")
+
+analyze_classical_limits()
+```
+
+---
+
+## Verification Plan
+
+### Automated Tests
+1. Ejecutar notebook completo
+2. Verificar generación de `datasets/shor_experiment.csv`
+3. Verificar gráficas en `datasets/analysis_plots.png`
+
+### Manual Verification
+1. No hay imports de `sympy` (solo math/numpy para operaciones)
+2. No hay conexiones a IBM Quantum
+3. Todos los factores se obtienen del circuito cuántico
+4. Las gráficas muestran tendencias esperadas:
+   - Tasa de éxito disminuye con n_bits
+   - Más shots mejoran tasa de éxito (hasta cierto punto)

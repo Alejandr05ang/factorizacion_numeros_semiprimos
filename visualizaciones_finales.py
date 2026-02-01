@@ -200,8 +200,9 @@ def plot_shots_efficiency(df):
     # Obtener lista de bits para graficar líneas separadas
     bits_list = sorted(grouped['n_bits'].unique())
     
-    # Colores distintivos
-    colors = plt.cm.viridis(np.linspace(0, 1, len(bits_list)))
+    # Colores distintivos (usamos tab10 para mayor contraste)
+    cmap = plt.get_cmap('tab10')
+    colors = [cmap(i % 10) for i in range(len(bits_list))]
     
     for i, n_bits in enumerate(bits_list):
         data = grouped[grouped['n_bits'] == n_bits]
